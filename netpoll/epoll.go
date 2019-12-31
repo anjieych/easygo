@@ -3,7 +3,9 @@
 package netpoll
 
 import (
+	"fmt"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -62,6 +64,8 @@ type Epoll struct {
 	waitDone chan struct{}
 
 	callbacks map[int]func(EpollEvent)
+	grp       *Grpoolx
+	tkp       *Taskpool
 }
 
 // EpollConfig contains options for Epoll instance configuration.
@@ -239,10 +243,15 @@ func (ep *Epoll) wait(onError func(error)) {
 		close(ep.waitDone)
 	}()
 
-	events := make([]unix.EpollEvent, maxWaitEventsBegin)
-	callbacks := make([]func(EpollEvent), 0, maxWaitEventsBegin)
+	var loop int64 = 0
+	var tstart time.Time
+	var twait int64 //ms
 
-	for {
+	events := make([]unix.EpollEvent, maxWaitEventsBegin)
+	//callbacks := make([]func(EpollEvent), 0, maxWaitEventsBegin)
+
+	for ; ; loop = loop + 1 {
+		tstart = time.Now()
 		n, err := unix.EpollWait(ep.fd, events, -1)
 		if err != nil {
 			if temporaryErr(err) {
@@ -251,8 +260,9 @@ func (ep *Epoll) wait(onError func(error)) {
 			onError(err)
 			return
 		}
-
-		callbacks = callbacks[:n]
+		twait = time.Since(tstart).Milliseconds()
+		tstart = time.Now()
+		//callbacks = callbacks[:n]
 
 		ep.mu.RLock()
 		for i := 0; i < n; i++ {
@@ -261,20 +271,33 @@ func (ep *Epoll) wait(onError func(error)) {
 				ep.mu.RUnlock()
 				return
 			}
-			callbacks[i] = ep.callbacks[fd]
-		}
-		ep.mu.RUnlock()
-
-		for i := 0; i < n; i++ {
-			if cb := callbacks[i]; cb != nil {
-				cb(EpollEvent(events[i].Events))
-				callbacks[i] = nil
+			//callbacks[i] = ep.callbacks[fd]
+			if ep.grp == nil {
+				go ep.callbacks[fd](EpollEvent(events[i].Events))
+			} else {
+				task := ep.tkp.Get(ep.callbacks[fd], EpollEvent(events[i].Events))
+				if err = ep.grp.ScheduleTimeout(10*time.Millisecond, task); err != nil {
+					fmt.Println("call ep.grp.ScheduleTimeout() time out in Epoll wait()", err)
+				}
 			}
 		}
+		ep.mu.RUnlock()
+		if loop%20 == 0 {
+			fmt.Printf("%s\t,loop=%d\t,count=%d\t,EpollWait(ms)=%d\t,callback(ms)=%d\n", tstart, loop, n, twait, time.Since(tstart).Milliseconds())
+		}
+
+		/*
+			for i := 0; i < n; i++ {
+				if cb := callbacks[i]; cb != nil {
+					cb(EpollEvent(events[i].Events))
+					callbacks[i] = nil
+				}
+			}
+		*/
 
 		if n == len(events) && n*2 <= maxWaitEventsStop {
 			events = make([]unix.EpollEvent, n*2)
-			callbacks = make([]func(EpollEvent), 0, n*2)
+			//callbacks = make([]func(EpollEvent), 0, n*2)
 		}
 	}
 }

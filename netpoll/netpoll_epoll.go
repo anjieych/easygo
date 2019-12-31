@@ -20,6 +20,22 @@ func New(c *Config) (Poller, error) {
 	return poller{epoll}, nil
 }
 
+// New creates new epoll-based Poller instance with given config.
+func NewWithGrpoolx(c *Config, grp *Grpoolx, tkp *Taskpool) (Poller, error) {
+	cfg := c.withDefaults()
+
+	epoll, err := EpollCreate(&EpollConfig{
+		OnWaitError: cfg.OnWaitError,
+	})
+	if err != nil {
+		return nil, err
+	}
+	epoll.grp = grp
+	epoll.tkp = tkp
+
+	return poller{epoll}, nil
+}
+
 // poller implements Poller interface.
 type poller struct {
 	*Epoll
